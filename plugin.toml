@@ -1,0 +1,17 @@
+name = "toolcall-guard"
+category = "extension"
+entry = "main:apply"
+description = "Detect tool calls that the model wrote as plain text (e.g. <code_run><parameter ...>, DSML, <code_run script=\"...\">) and ask it to regenerate instead of ending the run. Never executes the text."
+description_zh = "检测模型把工具调用写成正文文本的情况（如 <code_run><parameter ...>、DSML、<code_run script=\"...\">），自动要求模型重新生成，而不是把这一轮当成最终回复结束。不会执行这些文本。"
+inject = ["ga.agent"]
+provides = []
+
+[settings.max_retries]
+type = "integer"
+default = 2
+min = 0
+max = 5
+label = "Max consecutive retries"
+label_zh = "连续重试上限"
+description = "How many turns in a row the model is asked to regenerate. After that the reply is passed through unchanged. 0 disables the guard."
+description_zh = "连续多少轮要求模型重新生成；超过后按原样放行。设为 0 则关闭拦截。"
