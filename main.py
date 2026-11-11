@@ -97,7 +97,9 @@ _SPECIAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"|"
             r"^\s*<\s*invoke\s+name\s*=\s*[\"'][^\"']+[\"'][^>]*>"
             r"|"
-            r"<\s*function\s*=\s*[\"']?[a-zA-Z_][\w.-]*[\"']?\s*>\s*(?:\{|<|\n)",
+            r"<\s*function\s*=\s*[\"']?[a-zA-Z_][\w.-]*[\"']?\s*>\s*(?:\{|<|\n|\Z)"
+            r"|"
+            r"<\s*/?\s*(?:antml:)?(?:tool_call|function_calls|minimax:tool_call|tool_use)\s*[\"':=]*\s*>\s*\Z",
             re.I | re.M,
         ),
     ),
@@ -219,13 +221,14 @@ def _scan_xml_and_special(
     for kind, regex in _SPECIAL_PATTERNS:
         m = regex.search(scan_text)
         if m:
-            abs_off = base_offset + m.start()
+            lead_ws = len(m.group(0)) - len(m.group(0).lstrip())
+            abs_off = base_offset + m.start() + lead_ws
             inferred = _infer_tool_from_tail(source_text[abs_off:], names)
             hits.append(
                 Detection(
                     kind=kind,
                     tool=inferred,
-                    snippet=_compact(source_text[abs_off : abs_off + max(len(m.group(0)), 120)]),
+                    snippet=_compact(source_text[abs_off : abs_off + max(len(m.group(0)) - lead_ws, 120)]),
                     raw_offset=abs_off,
                 )
             )
@@ -293,7 +296,8 @@ def _scan_xml_and_special(
     m = other_tool_xml_re.search(scan_text)
     if m:
         tname = next((v for k, v in m.groupdict().items() if v), "")
-        abs_off = base_offset + m.start()
+        lead_ws = len(m.group(0)) - len(m.group(0).lstrip())
+        abs_off = base_offset + m.start() + lead_ws
         hits.append(
             Detection(
                 kind="tool-xml",
@@ -302,6 +306,41 @@ def _scan_xml_and_special(
                 raw_offset=abs_off,
             )
         )
+
+    # 3) Dangling / relay-mangled / stream-truncated tool tags (e.g. trailing "<code_run>" or "<code_run\">"):
+    #    - d1: malformed quote/colon/equals right after tool name anywhere (<code_run">, <code_run'>, <code_run")
+    #    - d2: standalone <tool_name> line immediately followed by another '<' tag or end-of-text
+    #    - d3..d5: trailing <tool_name>, </tool_name>, or mid-tag truncated <tool_name / <invoke name="tool_name at EOF
+    dangling_tool_xml_re = re.compile(
+        rf"<\s*/?\s*(?P<d1>{alt})\s*[\"':=]+[^>\n]{{0,120}}>?"
+        rf"|"
+        rf"^\s*<\s*/?\s*(?P<d2>{alt})\s*>[ \t]*(?:\r?\n\s*(?=<)|\Z)"
+        rf"|"
+        rf"<\s*/?\s*(?P<d3>{alt})\s*>\s*\Z"
+        rf"|"
+        rf"(?:^|\n)\s*<(?P<d4>{alt})(?:\s+[a-zA-Z_][\w-]*\s*=\s*[^>\n]{{0,200}})?\s*\Z"
+        rf"|"
+        rf"<\s*(?:(?:antml:)?(?:tool_call|invoke|tool_use|function_call)\b[^>\n]{{0,120}}\bname\s*=\s*[\"']?|function\s*=\s*[\"']?)(?P<d5>{alt})[\"']?[^>\n]{{0,120}}\s*\Z",
+        re.M,
+    )
+    m_dang = dangling_tool_xml_re.search(scan_text)
+    if m_dang:
+        # Ensure EOF-anchored matches (d3/d4/d5, or d2 at \Z) are truly at the tail of source_text
+        # and not merely followed by masked inline-code/fenced prose.
+        is_malformed = bool(m_dang.group("d1"))
+        after_in_source = source_text[base_offset + m_dang.end() :] if base_offset == 0 else ""
+        if is_malformed or not after_in_source.strip() or after_in_source.lstrip().startswith("<"):
+            tname = next((v for k, v in m_dang.groupdict().items() if v), "")
+            lead_ws = len(m_dang.group(0)) - len(m_dang.group(0).lstrip())
+            abs_off = base_offset + m_dang.start() + lead_ws
+            hits.append(
+                Detection(
+                    kind="tool-dangling-xml",
+                    tool=tname,
+                    snippet=_compact(source_text[abs_off : abs_off + 160]),
+                    raw_offset=abs_off,
+                )
+            )
 
     return hits
 

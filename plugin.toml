@@ -1,5 +1,5 @@
 name = "toolcall-guard"
-version = "0.2.0"
+version = "0.2.1"
 category = "extension"
 entry = "main:apply"
 description = "Detect plain-text/XML/DSML/token-leaked tool calls when no structured tool call was emitted, sanitize polluted history, and prompt the model to regenerate."
