@@ -1,17 +1,35 @@
 name = "toolcall-guard"
+version = "0.2.0"
 category = "extension"
 entry = "main:apply"
-description = "Detect tool calls that the model wrote as plain text (e.g. <code_run><parameter ...>, DSML, <code_run script=\"...\">) and ask it to regenerate instead of ending the run. Never executes the text."
-description_zh = "检测模型把工具调用写成正文文本的情况（如 <code_run><parameter ...>、DSML、<code_run script=\"...\">），自动要求模型重新生成，而不是把这一轮当成最终回复结束。不会执行这些文本。"
-inject = ["ga.agent"]
+description = "Detect plain-text/XML/DSML/token-leaked tool calls when no structured tool call was emitted, sanitize polluted history, and prompt the model to regenerate."
+description_zh = "当模型在正文中以纯文本/XML/DSML/控制标记形式伪造工具调用而未触发结构化工具调用时自动拦截、清理污染上下文并要求重新生成。"
+inject = ["ga.agent", "ga.hooks?"]
 provides = []
 
 [settings.max_retries]
 type = "integer"
-default = 2
+default = 3
 min = 0
-max = 5
+max = 10
 label = "Max consecutive retries"
-label_zh = "连续重试上限"
-description = "How many turns in a row the model is asked to regenerate. After that the reply is passed through unchanged. 0 disables the guard."
-description_zh = "连续多少轮要求模型重新生成；超过后按原样放行。设为 0 则关闭拦截。"
+label_zh = "最大连续重试次数"
+description = "Maximum consecutive regeneration prompts when the model keeps outputting plain-text tool calls on the same step (0 disables interception)."
+description_zh = "同一执行步连续检测到纯文本伪工具调用时的最大重试提示次数（设为 0 则禁用拦截）。"
+
+[settings.sanitize_history]
+type = "boolean"
+default = true
+label = "Sanitize polluted assistant history"
+label_zh = "清理污染的助手上下文"
+description = "Strip the leaked plain-text tool call tail from the assistant's recorded message before retrying so the model does not imitate its own broken format."
+description_zh = "触发重试前从当前轮助手历史消息中剥离混入正文的伪工具调用片段（保留 thinking 签名与 summary），避免长上下文自模仿复发。"
+
+[settings.extra_markers]
+type = "string"
+default = ""
+max_length = 2000
+label = "Extra trigger markers (comma-separated)"
+label_zh = "额外触发特征词（逗号分隔）"
+description = "Optional custom substrings (e.g. '<my_tool_tag>,[CALL_TOOL]') that should also be treated as plain-text tool calls."
+description_zh = "可选的自定义子串（用英文逗号分隔，如 '<my_tool_tag>,[CALL_TOOL]'），命中时同样视为纯文本工具调用。"

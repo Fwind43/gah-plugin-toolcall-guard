@@ -1,62 +1,47 @@
-# toolcall-guard
+# gah-plugin-toolcall-guard
 
-A [GenericAgent-Harness](https://github.com/Fwind43/GenericAgent-Harness) plugin that catches tool calls a model wrote as plain text and asks it to regenerate, instead of letting the run end.
+A **GA-Harness** worker extension plugin (`v0.2.0`) that detects **plain-text / XML / DSML / special-token tool calls** when the LLM fails to emit a structured API `tool_calls` payload, **sanitizes the polluted assistant turn in conversation history** so the model does not self-imitate on retry, surfaces a structured step warning in the Web UI, and automatically prompts the model to regenerate using real structured `tool_calls`.
 
-[GenericAgent-Harness](https://github.com/Fwind43/GenericAgent-Harness) 插件：模型把工具调用写成正文文本时，自动要求它重新生成，而不是让这一轮被当成最终回复结束。
+## Why
 
-## 问题
+During long multi-step sessions (50k–100k+ tokens) or across certain OpenAI-compatible / DeepSeek / Qwen / Kimi / GLM / Minimax / Claude / Llama / Mistral gateways, models occasionally drift into writing tool invocations directly inside the assistant text body instead of structured `tool_calls` — for example:
 
-部分模型（在 deepseek-v4.1-flash 上观察到）偶尔不发结构化工具调用，而是把调用写进回复正文：
+- **XML tool + parameter blocks** (even when truncated at `max_tokens` without closing `</tool>` or exceeding 8 KB, e.g. large `file_write` / `code_run` scripts):
+  ```xml
+  <summary>Run verification script</summary>
+  <code_run>
+  <script>
+  import pathlib
+  ...
+  ```
+- **DeepSeek DSML / BPE tokens**: `<｜DSML｜function_calls>`, `<｜DSML｜invoke name="code_run">`, `<｜tool▁calls▁begin｜>`
+- **Kimi / GLM / Qwen / Claude / Minimax / Llama / Mistral control markers**: `<|tool_calls_section_begin|>`, `<|tool_call|>`, `<tool_call>{...}</tool_call>`, `<antml:function_calls>`, `<minimax:tool_call>`, `<function=file_read>`, `[TOOL_CALLS]`
+- **Raw JSON tool call objects** or **sole-fenced XML pseudo-calls** (` ```xml\n<code_run>...</code_run>\n``` `)
 
-```text
-<code_run><parameter name="script">...</parameter></code_run>
-<code_run> <｜DSML｜ parameter name="script" string="true">...
-<code_run script="...">...</code_run>
-```
+Without `toolcall-guard`, GenericAgent sees `no_tool`, treats the turn as a final plain-text reply, and terminates the task prematurely while dumping raw XML/code into the chat. Even if retried naively, leaving the broken XML inside `backend.history` causes strong in-context self-imitation on subsequent turns.
 
-GA 看不到工具调用，就把这段文本当成最终回复，run 直接结束，用户只能手动发"继续"。
+## Key Capabilities (v0.2.0)
 
-## 行为
+1. **Schema-Aware Multi-Pattern Detection** (`detect_text_tool_call`):
+   - Reads active tool names **and** parameter schemas (`script`, `path`, `old_content`, `new_content`, etc.) dynamically from `agent.tools_handler`.
+   - Catches `<tool><param>...` blocks **even when truncated mid-stream without a closing `</tool>` tag** or with payloads up to 200 KB.
+   - Catches DeepSeek DSML & `▁` BPE tokens, Kimi/GLM/Qwen/Anthropic/Minimax/Llama/Mistral wrappers, raw JSON tool objects, user-configured `extra_markers`, and sole-fenced XML tool calls.
+   - Masks `<think>`, `<thinking>`, `<thought>`, `<summary>`, inline backticks, and prose-accompanied markdown code fences to avoid false positives when explaining syntax to users.
+2. **History Sanitization Against Self-Imitation** (`sanitize_history = true`):
+   - Truncates the leaked plain-text tool markup from the trailing assistant message in `llmclient.backend.history` (across OpenAI, Anthropic, Responses API, and Cascade multi-session backends) while preserving `<summary>`, `thinking` blocks + cryptographic `signature`, and strict `user`/`assistant` role alternation.
+   - Resets `llmclient.last_tools = ""` on text-protocol `ToolClient` sessions so tool schemas are freshly re-anchored.
+3. **Tool-Specific Retry Guidance & Clean Exhaustion**:
+   - Returns `StepOutcome(..., next_prompt=...)` with concrete instructions (e.g. reminding the model that `code_run` can also execute a ```python fenced block when structured JSON escaping is error-prone).
+   - Emits structured `tool.call` + `tool.result` (`toolcall_guard`) events so Web UI step logs record every interception clearly, and emits a visible exhaustion notice if `max_retries` is reached.
 
-- 包装 `GenericAgentHandler.do_no_tool`（"本轮没有工具调用"分支）。不修改 GA 源码，禁用插件时还原。
-- 正文命中以下任一写法即拦截，工具名取自 GA 当前的工具表：
-  - `<工具名>` 后紧跟 `<parameter ...>`
-  - `<工具名>` 后紧跟 DSML 标记
-  - `<工具名 参数="...">`
-  - `<invoke name="工具名">`
-- 命中后给模型回一条"格式无效、未执行任何工具，请用结构化调用重新生成"，并输出一行 `[Warn]`。
-- **只检测，不执行**：不会把这段文本解析成真正的调用。
-- 连续命中超过 `max_retries` 后按原样放行，避免死循环。
+## Settings
 
-## 设置
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `max_retries` | integer (`0`–`10`) | `3` | Maximum consecutive regeneration attempts per turn (`0` disables interception). |
+| `sanitize_history` | boolean | `true` | Strip plain-text tool call markup from the polluted assistant turn in LLM history before retrying. |
+| `extra_markers` | string | `""` | Optional comma-separated custom substrings that also trigger interception. |
 
-| 项 | 默认 | 说明 |
-| --- | --- | --- |
-| `max_retries` | `2` | 连续要求重新生成的轮数上限（0–5）。`0` 关闭拦截。 |
+## Installation
 
-## 安装
-
-插件面板 → 导入 → Git：
-
-- URL：`https://github.com/Fwind43/gah-plugin-toolcall-guard`
-- 分支或 tag：`v0.1.0`
-
-也可以下载源码 zip 后用 zip 导入，或把目录放到 `{data_dir}/plugins/toolcall-guard/` 后重新扫描。启用后从下一次 run 起生效。
-
-## 已知局限
-
-- 围栏代码块和行内代码里的内容不检测，模型把伪调用包在代码块里会漏过。
-- 模型在最终回复里裸写 `<code_run>...</code_run>` 当示例会被误拦一次（提示语会让它改用代码块）。
-- 依赖 GA 的 `do_no_tool` 方法签名，GA 版本差异可能导致不兼容。
-
-## 状态
-
-v0.1.0 为早期版本：只通过了合成单测（检测样例 + 假 handler 的包装/还原），尚未在真实 harness 运行中验证。启用后请先确认插件状态无报错。
-
-## 插件生态约定
-
-GenericAgent-Harness 的第三方插件仓库建议：
-
-- 打上 GitHub topic [`ga-harness-plugin`](https://github.com/topics/ga-harness-plugin)，便于检索；
-- 仓库名用 `gah-plugin-<name>`，`plugin.toml` 放在仓库根目录，可直接用 Git 地址导入；
-- 用 `vX.Y.Z` tag 发版，导入时填 tag 可固定版本。
+Copy this folder to `$GAH_DATA_DIR/plugins/toolcall-guard` (on Windows Desktop: `C:\Program Files\ga-harness-desktop\data\plugins\toolcall-guard`), then rescan & enable via the Plugins panel or `plugin_control`. Takes effect starting from the next worker run/turn.
